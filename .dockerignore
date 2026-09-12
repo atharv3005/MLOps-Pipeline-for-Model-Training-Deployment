@@ -1,0 +1,28 @@
+# Git & CI
+.git/
+.github/
+
+# Environments & Python cache
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# MLflow local storage
+mlruns/
+mlflow.db
+artifacts/
+
+# Testing & logs
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+data/prediction_logs.jsonl
+
+# Credentials
+gdrive*.json
+.env*

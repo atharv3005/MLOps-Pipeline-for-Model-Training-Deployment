@@ -9,9 +9,13 @@ train:
   C: 1.0
   max_iter: 1000
   random_state: 42
-  min_accuracy_threshold: 0.70   # CI fails the build below this
+  min_accuracy_threshold: 0.70   # Gate: fails training/CI if test accuracy < 70%
+  experiment_name: sentiment-classifier
+  registered_model_name: sentiment-classifier
 
 drift:
-  text_length_ks_pvalue_threshold: 0.05   # below this => distribution shift flagged
-  class_balance_psi_threshold: 0.2        # above this => population shift flagged
-  min_predictions_for_check: 20           # don't judge drift on tiny samples
+  drift_threshold: 0.03                 # 3.0% threshold: flags prediction distribution drift > 3%
+  text_length_ks_pvalue_threshold: 0.05  # KS-test p-value threshold for input feature length shift
+  class_balance_psi_threshold: 0.2       # PSI threshold for categorical population shift
+  min_predictions_for_check: 20          # Minimum sample window required before running statistical checks
+

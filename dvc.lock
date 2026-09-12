@@ -1,0 +1,67 @@
+schema: '2.0'
+stages:
+  data_prep:
+    cmd: python src/data_prep.py
+    deps:
+    - path: data/raw/reviews.csv
+      hash: md5
+      md5: 795d35d89f9b1d6354c05ace0fe3c5af
+      size: 13050707
+    - path: src/data_prep.py
+      hash: md5
+      md5: d7fd89e1845ce5ddd99055c7ecf6ff5c
+      size: 3489
+    params:
+      params.yaml:
+        data_prep.random_state: 42
+        data_prep.test_size: 0.2
+    outs:
+    - path: data/processed/baseline_stats.json
+      hash: md5
+      md5: 9e9dac9e3e98cae7f12dc204b9d49721
+      size: 99322
+    - path: data/processed/test.csv
+      hash: md5
+      md5: 2f8e5df75f8ab7b44b1956a47707ba4b
+      size: 2528936
+    - path: data/processed/train.csv
+      hash: md5
+      md5: 4805432f53116c1c774cdb6fd4eea2c0
+      size: 10112449
+  train:
+    cmd: python src/train.py
+    deps:
+    - path: data/processed/test.csv
+      hash: md5
+      md5: 2f8e5df75f8ab7b44b1956a47707ba4b
+      size: 2528936
+    - path: data/processed/train.csv
+      hash: md5
+      md5: 4805432f53116c1c774cdb6fd4eea2c0
+      size: 10112449
+    - path: src/train.py
+      hash: md5
+      md5: 196463dd00608f352fa911e46ceb98e9
+      size: 5562
+    params:
+      params.yaml:
+        train.C: 1.0
+        train.max_features: 2000
+        train.max_iter: 1000
+        train.min_accuracy_threshold: 0.7
+        train.ngram_range_max: 2
+        train.ngram_range_min: 1
+        train.random_state: 42
+    outs:
+    - path: models/metrics.json
+      hash: md5
+      md5: 66421150800c91ea638a09e2c8797838
+      size: 128
+    - path: models/model.pkl
+      hash: md5
+      md5: c4f62a659bb7c1aeadbfc263c112aa60
+      size: 17007
+    - path: models/vectorizer.pkl
+      hash: md5
+      md5: f1e53aa8263edbc6775bdab9ae86cd16
+      size: 73778

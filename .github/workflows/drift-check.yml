@@ -1,44 +1,77 @@
-name: Drift Check & Auto-Retrain
+name: Scheduled Drift Detection & Auto-Retraining
 
 on:
   schedule:
-    - cron: "0 3 * * 1"   # every Monday 03:00 UTC — adjust to your traffic volume
-  workflow_dispatch: {}    # lets you trigger it manually from the Actions tab
+    - cron: "0 3 * * 1"   # Weekly scheduled execution (Monday 03:00 UTC)
+  workflow_dispatch: {}    # Manual trigger via GitHub Actions UI
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}/sentiment-api
 
 jobs:
-  check-drift:
+  monitor-and-retrain:
+    name: Drift Check, Auto-Retrain & Redeploy
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      # In production, replace this with a step that pulls real
-      # prediction_logs.jsonl from wherever your deployed API persists
-      # it (S3, a mounted volume, a logging DB) before checking drift.
-      - name: Check for drift
+      - name: Run Drift Detection (3% Threshold Gate)
         id: drift
         run: |
+          set +e
           python src/monitor_drift.py
-          echo "drift_detected=$?" >> "$GITHUB_OUTPUT"
-        continue-on-error: true
+          EXIT_CODE=$?
+          echo "drift_detected=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit 0
 
-      - name: Retrain if drift detected
-        if: steps.drift.outputs.drift_detected == '1'
-        run: python src/retrain.py
-
-      - name: Commit updated model + reports
+      - name: Auto-Retrain & Revalidate Model
+        id: retrain
         if: steps.drift.outputs.drift_detected == '1'
         run: |
-          git config user.name "mlops-bot"
-          git config user.email "mlops-bot@users.noreply.github.com"
-          git add models/ data/processed/baseline_stats.json
-          git diff --cached --quiet || git commit -m "Auto-retrain: drift detected [skip ci]"
+          echo "Prediction drift detected (> 3% threshold). Triggering automated retraining pipeline..."
+          python src/retrain.py
+
+      - name: Run Test Suite on Retrained Candidate
+        if: steps.drift.outputs.drift_detected == '1' && steps.retrain.outcome == 'success'
+        run: pytest tests/ -v
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        if: steps.drift.outputs.drift_detected == '1' && steps.retrain.outcome == 'success'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Redeploy Container Image
+        if: steps.drift.outputs.drift_detected == '1' && steps.retrain.outcome == 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+
+      - name: Commit Model Audit Reports & Metrics
+        if: steps.drift.outputs.drift_detected == '1'
+        run: |
+          git config user.name "mlops-automation[bot]"
+          git config user.email "mlops-automation[bot]@users.noreply.github.com"
+          git add models/metrics.json models/best_metrics.json models/drift_report.json models/retrain_report.json data/processed/baseline_stats.json
+          git diff --cached --quiet || git commit -m "Auto-retrain: drift > 3% detected, model revalidated and redeployed [skip ci]"
           git push
+

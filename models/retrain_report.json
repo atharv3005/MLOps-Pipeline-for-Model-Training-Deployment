@@ -1,0 +1,21 @@
+{
+  "timestamp": 1788471977.9366083,
+  "trigger": "scheduled_drift_or_manual",
+  "run_id": "62e62c1087e842c18e5b35d7502458d6",
+  "min_accuracy_threshold": 0.7,
+  "champion_accuracy": 0.9999,
+  "candidate_accuracy": 0.861,
+  "candidate_metrics": {
+    "accuracy": 0.861,
+    "f1": 0.8626482213438735,
+    "precision": 0.8525390625,
+    "recall": 0.873,
+    "roc_auc": 0.937872
+  },
+  "passes_min_threshold": true,
+  "beats_champion": false,
+  "validation_passed": false,
+  "status": "REJECTED",
+  "action": "retain_current_production_model",
+  "rejection_reason": "Candidate accuracy (0.8610) failed criteria (min threshold: 0.7000, champion: 0.9999)"
+}

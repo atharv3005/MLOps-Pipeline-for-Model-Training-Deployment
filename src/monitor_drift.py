@@ -1,100 +1,183 @@
 """
-Compares recent production predictions (data/prediction_logs.jsonl,
-written by serve.py) against the training-time baseline
-(data/processed/baseline_stats.json, written by data_prep.py).
+Production Prediction Drift Monitoring Module:
+Compares recent production prediction logs (data/prediction_logs.jsonl)
+against the stored training-time baseline (data/processed/baseline_stats.json).
 
-Two checks, both standard in production ML monitoring:
-  1. Kolmogorov-Smirnov test on text-length distribution -> catches
-     input drift (e.g. users suddenly sending much longer/shorter text).
-  2. Population Stability Index (PSI) on predicted-class balance ->
-     catches concept/label drift in what the model is outputting.
+Metrics & Evaluation:
+1. Prediction Distribution Drift (TVD / Absolute Positive Rate Shift):
+   Delta P = |P_current(positive) - P_baseline(positive)|
+   Flagged if Delta P > drift_threshold (configured at 0.03, i.e., 3.0%).
+2. Feature Distribution Drift:
+   Two-sample Kolmogorov-Smirnov test on text lengths (p-value < threshold).
+3. Population Stability Index (PSI):
+   PSI across predicted class distributions (PSI > threshold).
 
-Writes drift_report.json and exits 1 if drift is flagged, so this can
-gate a CI job or a scheduled GitHub Action directly.
+Outputs models/drift_report.json and exits with code 1 if drift exceeds threshold,
+triggering the auto-retraining workflow in GitHub Actions.
 """
 import json
 import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 from scipy.stats import ks_2samp
 
-from utils import ROOT, load_params
+from utils import (
+    BASELINE_STATS_PATH,
+    PREDICTION_LOGS_PATH,
+    DRIFT_REPORT_PATH,
+    load_json,
+    save_json,
+    load_params,
+)
 
-BASELINE_PATH = ROOT / "data" / "processed" / "baseline_stats.json"
-LOG_PATH = ROOT / "data" / "prediction_logs.jsonl"
-REPORT_PATH = ROOT / "models" / "drift_report.json"
 
-
-def psi(baseline_dist: dict, current_dist: dict, eps: float = 1e-4) -> float:
-    """Population Stability Index across the label categories."""
-    labels = set(baseline_dist) | set(current_dist)
+def compute_psi(baseline_dist: Dict[str, float], current_dist: Dict[str, float], eps: float = 1e-4) -> float:
+    """
+    Computes Population Stability Index (PSI) across category distributions:
+    PSI = sum((Actual_i - Expected_i) * ln(Actual_i / Expected_i))
+    """
+    labels = set(baseline_dist.keys()) | set(current_dist.keys())
     score = 0.0
     for label in labels:
-        b = baseline_dist.get(label, eps) or eps
-        c = current_dist.get(label, eps) or eps
+        b = float(baseline_dist.get(label, eps) or eps)
+        c = float(current_dist.get(label, eps) or eps)
         score += (c - b) * np.log(c / b)
     return float(score)
 
 
-def main():
-    thresholds = load_params()["drift"]
+def compute_drift(
+    baseline_stats: Dict[str, Any],
+    prediction_records: List[Dict[str, Any]],
+    thresholds: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Evaluates prediction distribution drift and statistical shift between baseline and current records.
+    """
+    drift_threshold = float(thresholds.get("drift_threshold", 0.03))
+    min_samples = int(thresholds.get("min_predictions_for_check", 20))
+    ks_pvalue_threshold = float(thresholds.get("text_length_ks_pvalue_threshold", 0.05))
+    psi_threshold = float(thresholds.get("class_balance_psi_threshold", 0.2))
 
-    if not BASELINE_PATH.exists():
-        print("No baseline stats found — run data_prep.py first.")
-        sys.exit(2)
+    n_records = len(prediction_records)
+    if n_records < min_samples:
+        return {
+            "status": "insufficient_data",
+            "n_predictions_checked": n_records,
+            "min_predictions_required": min_samples,
+            "drift_detected": False,
+            "action": "continue_monitoring",
+            "message": f"Only {n_records} predictions logged (need {min_samples}). Skipping drift check.",
+        }
 
-    with open(BASELINE_PATH) as f:
-        baseline = json.load(f)
+    # 1. Prediction Class Distribution & 3% Threshold
+    counts: Dict[str, int] = {}
+    for r in prediction_records:
+        label = str(r["predicted_label"])
+        counts[label] = counts.get(label, 0) + 1
 
-    if not LOG_PATH.exists():
-        print("No prediction logs yet — nothing to check.")
-        sys.exit(0)
+    current_dist = {k: v / n_records for k, v in counts.items()}
+    baseline_dist = baseline_stats["class_distribution"]
 
-    with open(LOG_PATH) as f:
-        records = [json.loads(line) for line in f if line.strip()]
+    # Calculate absolute delta on positive rate (Total Variation Distance for binary classes)
+    baseline_pos = float(baseline_dist.get("positive", 0.5))
+    current_pos = float(current_dist.get("positive", 0.0))
+    prediction_drift_value = abs(current_pos - baseline_pos)
+    prediction_drift_flagged = bool(prediction_drift_value > drift_threshold)
 
-    if len(records) < thresholds["min_predictions_for_check"]:
-        print(
-            f"Only {len(records)} predictions logged, need "
-            f"{thresholds['min_predictions_for_check']} — skipping check."
-        )
-        sys.exit(0)
+    # 2. Input Feature (Text Length) Kolmogorov-Smirnov Test
+    current_lengths = [int(r["text_length"]) for r in prediction_records if "text_length" in r]
+    baseline_lengths = baseline_stats.get("text_lengths_sample", [])
 
-    current_lengths = [r["text_length"] for r in records]
-    baseline_lengths = baseline["text_lengths_sample"]
+    if baseline_lengths and current_lengths:
+        ks_stat, ks_pvalue = ks_2samp(baseline_lengths, current_lengths)
+        ks_stat = float(ks_stat)
+        ks_pvalue = float(ks_pvalue)
+        length_drift_flagged = bool(ks_pvalue < ks_pvalue_threshold)
+    else:
+        ks_stat, ks_pvalue = 0.0, 1.0
+        length_drift_flagged = False
 
-    ks_stat, ks_pvalue = ks_2samp(baseline_lengths, current_lengths)
-    length_drift = ks_pvalue < thresholds["text_length_ks_pvalue_threshold"]
+    # 3. Population Stability Index (PSI)
+    psi_score = compute_psi(baseline_dist, current_dist)
+    psi_drift_flagged = bool(psi_score > psi_threshold)
 
-    current_counts = {}
-    for r in records:
-        current_counts[r["predicted_label"]] = current_counts.get(r["predicted_label"], 0) + 1
-    total = sum(current_counts.values())
-    current_dist = {k: v / total for k, v in current_counts.items()}
-
-    psi_score = psi(baseline["class_distribution"], current_dist)
-    class_drift = psi_score > thresholds["class_balance_psi_threshold"]
-
-    drift_detected = length_drift or class_drift
+    # Combined drift trigger: primary trigger is prediction drift > 3% threshold
+    drift_detected = bool(prediction_drift_flagged or length_drift_flagged or psi_drift_flagged)
+    action = "trigger_retraining" if drift_detected else "continue_monitoring"
 
     report = {
-        "n_predictions_checked": len(records),
-        "text_length_ks_pvalue": ks_pvalue,
-        "text_length_drift_flagged": length_drift,
+        "timestamp": time.time(),
+        "n_predictions_checked": n_records,
+        "drift_threshold": drift_threshold,
+        "drift_metric": "prediction_distribution_shift_tvd",
+        "prediction_drift_value": float(round(prediction_drift_value, 4)),
+        "prediction_drift_flagged": prediction_drift_flagged,
+        "class_distribution_baseline": baseline_dist,
         "class_distribution_current": current_dist,
-        "class_distribution_baseline": baseline["class_distribution"],
-        "psi_score": psi_score,
-        "class_drift_flagged": class_drift,
+        "text_length_ks_statistic": ks_stat,
+        "text_length_ks_pvalue": ks_pvalue,
+        "text_length_ks_threshold": ks_pvalue_threshold,
+        "text_length_drift_flagged": length_drift_flagged,
+        "psi_score": float(round(psi_score, 4)),
+        "psi_threshold": psi_threshold,
+        "psi_drift_flagged": psi_drift_flagged,
         "drift_detected": drift_detected,
+        "action": action,
     }
+    return report
 
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(REPORT_PATH, "w") as f:
-        json.dump(report, f, indent=2)
 
+def check_drift(
+    baseline_path: Path = BASELINE_STATS_PATH,
+    logs_path: Path = PREDICTION_LOGS_PATH,
+    report_path: Path = DRIFT_REPORT_PATH,
+    params_path: str = "params.yaml",
+) -> Tuple[Dict[str, Any], int]:
+    """
+    Executes the drift evaluation workflow, saves drift_report.json, and returns (report, exit_code).
+    """
+    if not baseline_path.exists():
+        print(f"Error: Baseline statistics file not found at {baseline_path}. Run data_prep.py first.")
+        return {"error": "Baseline file missing"}, 2
+
+    baseline_stats = load_json(baseline_path)
+    thresholds = load_params(params_path)["drift"]
+
+    if not logs_path.exists():
+        print("No prediction logs found yet at data/prediction_logs.jsonl.")
+        report = {
+            "n_predictions_checked": 0,
+            "drift_detected": False,
+            "action": "continue_monitoring",
+            "message": "No prediction logs found.",
+        }
+        return report, 0
+
+    with open(logs_path, "r", encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+
+    report = compute_drift(baseline_stats, records, thresholds)
+    save_json(report, report_path)
+
+    print("=== Drift Monitoring Report ===")
     print(json.dumps(report, indent=2))
 
-    sys.exit(1 if drift_detected else 0)
+    if report.get("drift_detected", False):
+        print(f"\n[ALERT] Drift detected! Action: {report['action']}. Exiting with code 1.")
+        return report, 1
+    else:
+        print(f"\n[OK] Model healthy. Drift within configured thresholds. Action: {report['action']}.")
+        return report, 0
+
+
+def main() -> None:
+    _, exit_code = check_drift()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
     main()
+

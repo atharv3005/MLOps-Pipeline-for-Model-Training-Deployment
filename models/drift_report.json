@@ -1,0 +1,25 @@
+{
+  "timestamp": 1788471632.2487617,
+  "n_predictions_checked": 50,
+  "drift_threshold": 0.03,
+  "drift_metric": "prediction_distribution_shift_tvd",
+  "prediction_drift_value": 0.04,
+  "prediction_drift_flagged": true,
+  "class_distribution_baseline": {
+    "positive": 0.5,
+    "negative": 0.5
+  },
+  "class_distribution_current": {
+    "negative": 0.46,
+    "positive": 0.54
+  },
+  "text_length_ks_statistic": 0.08770000000000006,
+  "text_length_ks_pvalue": 0.8071807406799043,
+  "text_length_ks_threshold": 0.05,
+  "text_length_drift_flagged": false,
+  "psi_score": 0.0064,
+  "psi_threshold": 0.2,
+  "psi_drift_flagged": false,
+  "drift_detected": true,
+  "action": "trigger_retraining"
+}
